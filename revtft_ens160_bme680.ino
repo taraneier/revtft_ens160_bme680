@@ -12,7 +12,7 @@
 #include <Adafruit_NeoPixel.h>
 #include "Adafruit_TestBed.h"
 #include <Adafruit_BME280.h>
-#include <Adafruit_ST7789.h> 
+#include <Adafruit_ST7789.h>
 #include <Fonts/FreeSans12pt7b.h>
 
 // Adafruit_BME280 bme280; // I2C
@@ -30,7 +30,7 @@ int ArduinoLED = 13;
 
 #include "ScioSense_ENS160.h"  // ENS160 library
 // ScioSense_ENS160      ens160(ENS160_I2CADDR_0);
-ScioSense_ENS160      ens160(ENS160_I2CADDR_1);
+ScioSense_ENS160 ens160(ENS160_I2CADDR_1);
 
 /*BME680 - Bosch Sensor*/
 #include "Adafruit_BME680.h"
@@ -39,16 +39,63 @@ ScioSense_ENS160      ens160(ENS160_I2CADDR_1);
 #define BME_MOSI 11
 #define BME_CS 10
 
-Adafruit_BME680 bme; // I2C
+Adafruit_BME680 bme;  // I2C
 
 
 const char *ssid = "Endor";
 const char *password = "nubnubnub";
 
-WebServer server(80);
+WebServer server(8080);
+
+#include "HomeSpan.h"
+
+struct AQISensor : Service::AirQualitySensor {
+  SpanCharacteristic *aqi;
+  ScioSense_ENS160 ens160;
 
 
-void handleNotFound() {
+  AQISensor(ScioSense_ENS160 &ens160)
+    : Service::AirQualitySensor() {
+    this->ens160 = ens160;
+    aqi = new Characteristic::AirQuality(2);  // set initial temperature
+    aqi->setRange(0, 5);                      // expand temperature range to allow negative values
+  }                                           // end constructor
+
+  void loop() {
+    if (ens160.available()) {
+      ens160.measure(true);
+      ens160.measureRaw(true);
+      aqi->setVal(ens160.getAQI());
+    }  // loop
+  }
+};
+
+struct CO2Sensor : Service::CarbonDioxideSensor {
+  SpanCharacteristic *co2;
+  SpanCharacteristic *cdd;
+  ScioSense_ENS160 ens160;
+
+
+  CO2Sensor(ScioSense_ENS160 &ens160)
+    : Service::CarbonDioxideSensor() {
+    this->ens160 = ens160;
+    co2 = new Characteristic::CarbonDioxideLevel(20);  // set initial temperature
+    co2->setRange(0, 100000);                      // expand temperature range to allow negative values
+    cdd = new Characteristic::CarbonDioxideDetected(1);
+    cdd->setRange(0,1);
+  }                                           // end constructor
+
+  void loop() {
+    if (ens160.available()) {
+      ens160.measure(true);
+      ens160.measureRaw(true);
+      co2->setVal(ens160.geteCO2());
+    }  // loop
+  }
+};
+
+void
+handleNotFound() {
   // digitalWrite(led, 1);
   String message = "File Not Found\n\n";
   message += "URI: ";
@@ -70,32 +117,34 @@ void handleNotFound() {
 void setup() {
   Serial.begin(115200);
   //while (! Serial) delay(10);
-  
-  delay(100);
-  
-  TB.neopixelPin = PIN_NEOPIXEL;
-  TB.neopixelNum = 1; 
-  TB.begin();
-  TB.setColor(WHITE);
 
-  display.init(135, 240);           // Init ST7789 240x135
+  delay(100);
+  homeSpan.setLogLevel(3);
+  homeSpan.setStatusPixel(PIN_NEOPIXEL);
+  homeSpan.begin(Category::Bridges,"Air Quality");
+  // TB.neopixelPin = PIN_NEOPIXEL;
+  // TB.neopixelNum = 1;
+  // TB.begin();
+  // TB.setColor(WHITE);
+
+  display.init(135, 240);  // Init ST7789 240x135
   display.setRotation(3);
   canvas.setFont(&FreeSans12pt7b);
-  canvas.setTextColor(ST77XX_WHITE); 
+  canvas.setTextColor(ST77XX_WHITE);
 
   if (!lipo.begin()) {
     Serial.println(F("Couldnt find Adafruit MAX17048?\nMake sure a battery is plugged in!"));
     while (1) delay(10);
   }
-    
+
   Serial.print(F("Found MAX17048"));
-  Serial.print(F(" with Chip ID: 0x")); 
+  Serial.print(F(" with Chip ID: 0x"));
   Serial.println(lipo.getChipID(), HEX);
 
   // if (TB.scanI2CBus(0x77)) {
   //   Serial.println("BME280 address");
 
-  //   unsigned status = bme280.begin();  
+  //   unsigned status = bme280.begin();
   //   if (!status) {
   //     Serial.println("Could not find a valid BME280 sensor, check wiring, address, sensor ID!");
   //     Serial.print("SensorID was: 0x"); Serial.println(bme280.sensorID(),16);
@@ -125,14 +174,14 @@ void setup() {
   Serial.println();
   Serial.println("------------------------------------------------------------");
   delay(1000);
-  #if defined(ARDUINO_ADAFRUIT_QTPY_ESP32S2) || defined(ARDUINO_ADAFRUIT_QTPY_ESP32S3_NOPSRAM) || defined(ARDUINO_ADAFRUIT_QTPY_ESP32S3) || defined(ARDUINO_ADAFRUIT_QTPY_ESP32_PICO)
+#if defined(ARDUINO_ADAFRUIT_QTPY_ESP32S2) || defined(ARDUINO_ADAFRUIT_QTPY_ESP32S3_NOPSRAM) || defined(ARDUINO_ADAFRUIT_QTPY_ESP32S3) || defined(ARDUINO_ADAFRUIT_QTPY_ESP32_PICO)
   // ESP32 is kinda odd in that secondary ports must be manually
   // assigned their pins with setPins()!
   Serial.println("Setting up Wire1 for ESP32S2");
   Wire1.setPins(SDA1, SCL1);
-  #endif
+#endif
   Wire1.begin();
-  
+
 
 
   Serial.print("ENS160...");
@@ -140,10 +189,13 @@ void setup() {
   Serial.println(ens160.available() ? "done." : "failed!");
   if (ens160.available()) {
     // Print ENS160 versions
-    Serial.print("\tRev: "); Serial.print(ens160.getMajorRev());
-    Serial.print("."); Serial.print(ens160.getMinorRev());
-    Serial.print("."); Serial.println(ens160.getBuild());
-  
+    Serial.print("\tRev: ");
+    Serial.print(ens160.getMajorRev());
+    Serial.print(".");
+    Serial.print(ens160.getMinorRev());
+    Serial.print(".");
+    Serial.println(ens160.getBuild());
+
     Serial.print("\tStandard mode ");
     Serial.println(ens160.setMode(ENS160_OPMODE_STD) ? "done." : "failed!");
   }
@@ -152,24 +204,25 @@ void setup() {
 
   /*BME680 - Bosch Sensor*/
   Serial.println("Adafruit BME680 Test");
-   if (!bme.begin()) {
+  if (!bme.begin()) {
     Serial.println("Could not find a valid BME680 sensor, check wiring!");
-    while (1);
+    while (1)
+      ;
   }
   Serial.println("Found BME680 sensor");
-  
+
   // Set up oversampling and filter initialization
   bme.setTemperatureOversampling(BME680_OS_8X);
   bme.setHumidityOversampling(BME680_OS_2X);
   bme.setPressureOversampling(BME680_OS_4X);
   bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
-  bme.setGasHeater(320, 150); // 320*C for 150 ms
+  bme.setGasHeater(320, 150);  // 320*C for 150 ms
 
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  
-  
+
+
   Serial.println("");
 
   // Wait for connection
@@ -196,38 +249,71 @@ void setup() {
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("HTTP server started");
+  
+  new SpanAccessory();  
+    new Service::AccessoryInformation();
+      new Characteristic::Identify(); 
+      
+  new SpanAccessory();
+    new Service::AccessoryInformation();
+      new Characteristic::Identify();
+      new Characteristic::Name("AQI");
+    new AQISensor(ens160);  
+
+  new SpanAccessory();
+    new Service::AccessoryInformation();
+      new Characteristic::Identify();
+      new Characteristic::Name("CO2");
+    new CO2Sensor(ens160);
 
 }
 
 uint8_t j = 0;
 
 void loop() {
-  server.handleClient();
-  Serial.println("**********************");
-  /*ENS160 - Digital Air Quality Sensor*/
-  if (ens160.available()) {
-    ens160.measure(true);
-    ens160.measureRaw(true);
-  
-    Serial.print("AQI: ");Serial.print(ens160.getAQI());Serial.print("\t");
-    Serial.print("TVOC: ");Serial.print(ens160.getTVOC());Serial.print("ppb\t");
-    Serial.print("eCO2: ");Serial.print(ens160.geteCO2());Serial.print("ppm\t");
-    Serial.print("R HP0: ");Serial.print(ens160.getHP0());Serial.print("Ohm\t");
-    Serial.print("R HP1: ");Serial.print(ens160.getHP1());Serial.print("Ohm\t");
-    Serial.print("R HP2: ");Serial.print(ens160.getHP2());Serial.print("Ohm\t");
-    Serial.print("R HP3: ");Serial.print(ens160.getHP3());Serial.println("Ohm");
-  }
-  /* END ENS160 - Digital Air Quality Sensor*/
-  if (! bme.performReading()) {
+
+  if (!bme.performReading()) {
     Serial.println("Failed to perform reading :(");
     return;
   }
-  TB.printI2CBusScan();
+  // TB.printI2CBusScan();
+  server.handleClient();
+  // Serial.println("**********************");
+  /*ENS160 - Digital Air Quality Sensor*/
+  if (ens160.available()) {
+    ens160.set_envdata(bme.temperature, bme.humidity);
+    ens160.measure(true);
+    ens160.measureRaw(true);
+
+    // Serial.print("AQI: ");
+    // Serial.print(ens160.getAQI());
+    // Serial.print("\t");
+    // Serial.print("TVOC: ");
+    // Serial.print(ens160.getTVOC());
+    // Serial.print("ppb\t");
+    // Serial.print("eCO2: ");
+    // Serial.print(ens160.geteCO2());
+    // Serial.print("ppm\t");
+    // Serial.print("R HP0: ");
+    // Serial.print(ens160.getHP0());
+    // Serial.print("Ohm\t");
+    // Serial.print("R HP1: ");
+    // Serial.print(ens160.getHP1());
+    // Serial.print("Ohm\t");
+    // Serial.print("R HP2: ");
+    // Serial.print(ens160.getHP2());
+    // Serial.print("Ohm\t");
+    // Serial.print("R HP3: ");
+    // Serial.print(ens160.getHP3());
+    // Serial.println("Ohm");
+  }
+  /* END ENS160 - Digital Air Quality Sensor*/
+  
 
   if (j % 2 == 0) {
     canvas.fillScreen(ST77XX_BLACK);
     canvas.setCursor(0, 17);
-    
+
     canvas.setTextColor(ST77XX_YELLOW);
     canvas.print("VOC:");
     canvas.print(ens160.getTVOC());
@@ -235,7 +321,7 @@ void loop() {
     canvas.println(ens160.getAQI());
     canvas.print("CO2:");
     canvas.print(ens160.geteCO2());
-    canvas.setTextColor(ST77XX_BLUE); 
+    canvas.setTextColor(ST77XX_BLUE);
     canvas.print("  GAS:");
     canvas.println(bme.gas_resistance / 1000);
     canvas.print("TMP:");
@@ -253,7 +339,7 @@ void loop() {
     canvas.print(" V  /  ");
     canvas.print(lipo.cellPercent(), 0);
     canvas.println("%");
-    canvas.setTextColor(ST77XX_BLUE); 
+    canvas.setTextColor(ST77XX_BLUE);
     canvas.print("IP: ");
     canvas.setTextColor(ST77XX_WHITE);
     canvas.print(WiFi.localIP());
@@ -282,16 +368,16 @@ void loop() {
     pinMode(TFT_BACKLITE, OUTPUT);
     digitalWrite(TFT_BACKLITE, HIGH);
   }
-  
-  TB.setColor(TB.Wheel(j++));
-  delay(10);
-  return;
+  homeSpan.poll();
+  // TB.setColor(TB.Wheel(j++));
+  // delay(10);
+  // return;
 }
 
 
 void getReadings() {
-  
-  if (! bme.performReading()) {
+
+  if (!bme.performReading()) {
     Serial.println("Failed to perform reading :(");
     return;
   }
@@ -299,9 +385,9 @@ void getReadings() {
     ens160.measure(true);
     ens160.measureRaw(true);
   }
-  
+
   String out = "";
-//  char temp[100];
+  //  char temp[100];
   out += "{";
   out += "\"aqi:\":";
   out += ens160.getAQI();
@@ -339,8 +425,8 @@ void getReadings() {
 
 
 void getReadingsCSV() {
-  
-  if (! bme.performReading()) {
+
+  if (!bme.performReading()) {
     Serial.println("Failed to perform reading :(");
     return;
   }
@@ -348,7 +434,7 @@ void getReadingsCSV() {
     ens160.measure(true);
     ens160.measureRaw(true);
   }
-  
+
   String out = "";
   out += "aqi, tvoc, eco2, temp,hum,press,kohm,bv,bp,bt\n";
   out += ens160.getAQI();
